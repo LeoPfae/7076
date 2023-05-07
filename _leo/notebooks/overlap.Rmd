@@ -1,0 +1,98 @@
+---
+title: "overlap"
+output: html_document
+date: "2023-05-03"
+---
+
+
+# Overlap
+
+**Background**  
+Part of the mitochondrial genome shares two ORFs. In is unclear how the current annotation of synonymous mutations handles this.
+
+**Tasks**  
+1. Extract genomic coordinates from mitochondrial genome and check for all overlap regions  
+2. Check how synonymous annotations are handled in these overlapping regions.  
+
+**Approach**  
+1. Get mitochondrial coordinates from latest reference genome  
+2. Create dataframe with all genomic positions (forward and reverse strand) annotated for ORF on nucleotide level  
+3. Extract all overlapping regions  
+4. Check dataframe 
+
+
+## General  
+```{r}
+library(annotables)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(tidyr)
+```
+
+
+## 1. Get mitochondrial coordinates from latest reference genome  
+Get genes from annotables library and subset on genes annotated for "MT" genome
+
+```{r}
+mt_genome_coords <- annotables::grch38 %>% 
+  filter(chr == "MT")
+```
+
+## 2. Create dataframe with all genomic positions (forward and reverse strand annotated for ORF on nucleotide level)  
+Iterate over all annotated genes from point 1. and annotate df
+
+**Generate annotation df**  
+```{r}
+# Create dataframe base
+nt_annotation <- data.frame(
+  pos = rep(1:16569, 2),
+  strand = c(rep(1, 16569), rep(-1, 16569))
+)
+
+# Iterate over genes and annotate all nts with ORF
+for (gene_row in 1:nrow(mt_genome_coords)) {
+  row <- mt_genome_coords[gene_row, ]
+  strand <- row$strand
+  
+  all_nos <- row$start:row$end
+  
+  nt_annotation[nt_annotation$pos %in% all_nos & nt_annotation$strand == strand, row$symbol] <- row$symbol
+}
+
+nt_annotation <- nt_annotation %>% 
+  mutate(n_genes = rowSums(!is.na(dplyr::select(., -pos, -strand))))
+
+nt_annotation <- nt_annotation %>% 
+  dplyr::select(-pos, -strand, -n_genes) %>% 
+  unite(col = "orfs", colnames(.), sep = ",", na.rm = TRUE) %>% 
+  cbind(nt_annotation, .)
+```
+
+## 3. Extract all overlapping regions
+
+**Plot genome**  
+```{r}
+ggplot() +
+  geom_line(data = nt_annotation %>% filter(strand == 1), aes(x = pos, y = n_genes), color = "grey") +
+  geom_line(data = nt_annotation %>% filter(strand == -1), aes(x = pos, y = n_genes)) +
+  coord_polar()
+
+ggsave("../reports/overlaps.png")
+```
+
+
+**Check which kind of combinations exist with overlap**  
+```{r}
+nt_annotation %>% 
+  filter(n_genes > 1) %>% 
+  pull(orfs) %>% 
+  unique()
+```
+
+
+## 4. Check dataframe 
+
+Dataframe manually checked.
+
+
