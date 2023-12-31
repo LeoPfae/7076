@@ -1,0 +1,274 @@
+---
+title: "Overlapping SynVar"
+output: html_document
+date: "2023-12-30"
+---
+
+# Mutation distribution  
+
+**Background**  
+Paper reviewer asked following question:  
+
+Were any synonymous variants that also have a more severe consequence (i.e. missense) due lying in two genes excluded from analyses?  
+
+
+**Tasks**  
+1. Load mt genomic data and mutational databases  
+2. Show which areas are affected by overlapping genes  
+3. Show correct annotation in atlas  
+4. Show correct calling in in vivo data  
+
+
+## General  
+```{r}
+suppressMessages({
+  library(dplyr)
+  library(data.table)
+  library(tidyr)
+  library(purrr)
+  
+  library(ggplot2)
+  library(circlize)
+  library(BuenColors)
+  library(ComplexHeatmap)
+  
+  library(plyranges)
+  library(annotables)
+  library(BSgenome.Hsapiens.UCSC.hg38)
+  library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+  library(TxDb.Hsapiens.UCSC.hg38.refGene)
+})
+```
+
+
+
+## 1. Load mt genomic data and mutational databases  
+```{r}
+
+```
+
+
+
+## 2. Show which areas are affected by overlapping genes  
+```{r}
+# Get genomic data for mitochondrial genome
+mt_genes <- annotables::grch38 %>% filter(chr == "MT")
+
+mt_genes_bed <- mt_genes %>% dplyr::rename(name = symbol) %>%
+  dplyr::select(chr, start, end, strand, name, biotype) %>% 
+  mutate(color = case_when(
+    biotype == "protein_coding" ~ jdb_palette("corona")[[1]],
+    biotype == "Mt_tRNA" ~ jdb_palette("corona")[[3]],
+    biotype == "Mt_rRNA" ~ jdb_palette("corona")[[4]]
+  ))
+
+mt_genes_bed_pos <- mt_genes_bed %>% filter(strand == 1)
+mt_genes_bed_neg <- mt_genes_bed %>% filter(strand == -1)
+
+# Calculate location of overlaps
+## Create dataframe base
+nt_annotation <- data.frame(
+  pos = rep(1:16569, 2),
+  strand = c(rep(1, 16569), rep(-1, 16569))
+)
+
+## Iterate over genes and annotate all nts with ORF
+for (gene_row in 1:nrow(mt_genes_bed)) {
+  row <- mt_genes_bed[gene_row, ]
+  strand <- row$strand
+  
+  all_nos <- row$start:row$end
+  
+  nt_annotation[nt_annotation$pos %in% all_nos & nt_annotation$strand == strand, row$name] <- row$name
+}
+
+nt_annotation <- nt_annotation %>% 
+  mutate(n_genes = rowSums(!is.na(dplyr::select(., -pos, -strand))))
+
+nt_annotation <- nt_annotation %>% 
+  dplyr::select(-pos, -strand, -n_genes) %>% 
+  unite(col = "orfs", colnames(.), sep = ",", na.rm = TRUE) %>% 
+  cbind(nt_annotation, .)
+
+## Transform into consensus bed format
+segment_list <- c()
+current_segment <- 1
+for (i in 1:nrow(nt_annotation)) {
+  if (i == 1) {
+    segment_list <- append(segment_list, 1)
+  } else if (nt_annotation$n_genes[[i]] != nt_annotation$n_genes[[i - 1]] | nt_annotation$strand[[i]] != nt_annotation$strand[[i - 1]]) {
+    current_segment <- current_segment + 1
+    segment_list <- append(segment_list, current_segment)
+  } else {
+    segment_list <- append(segment_list, current_segment)
+  }
+}
+
+nt_annotation_bed <- nt_annotation %>%
+  mutate(segment = segment_list) %>% 
+  group_by(segment) %>% 
+  arrange(pos) %>% 
+  dplyr::filter(row_number() == 1 | row_number() == dplyr::n()) %>% 
+  group_by(segment) %>% 
+  filter(length(unique(strand)) == 1) %>% 
+  mutate(start = min(pos), end = max(pos)) %>% 
+  mutate(chr = "MT") %>% 
+  dplyr::select(chr, start, end, n_genes, strand, segment) %>% 
+  distinct() %>% 
+  arrange(segment) %>% 
+  data.frame() %>% 
+  mutate(color = case_when(n_genes > 1 ~ "red", .default = NA))
+  
+nt_annotation_bed_pos <- nt_annotation_bed %>% 
+  dplyr::filter(strand == 1) %>% 
+  dplyr::filter(n_genes > 1) %>% 
+  dplyr::select(chr, start, end, n_genes, color)
+nt_annotation_bed_neg <- nt_annotation_bed %>% 
+  dplyr::filter(strand == -1) %>% 
+  dplyr::filter(n_genes > 1) %>% 
+  dplyr::select(chr, start, end, n_genes, color)
+
+
+# Create plot of mitochondrial genome with genes
+mt_base_genome <- data.frame(name = c("MT"), start = c(0), end = c(16569))
+
+
+{
+  circos.clear()
+  circos.par("start.degree" = 90, "track.height" = 0.1, "gap.degree" = 90)
+  circos.genomicInitialize(mt_base_genome)
+  # Positive strand
+  circos.genomicTrack(
+    mt_genes_bed_pos,
+    stack = TRUE,
+    panel.fun = function(region, value, ...) {
+      circos.genomicRect(region, value, col = mt_genes_bed_pos$color, border = NA, ...)
+      xlim = CELL_META$xlim
+      circos.text(
+        rep(xlim[1], 9),
+        1:9, 
+        paste("ORFs on heavy strand"), 
+        facing = "downward",
+        adj = c(1.08, 0.6),
+        cex = 0.6
+      )
+    })
+  circos.genomicTrack(
+    nt_annotation_bed_pos,
+    ylim = c(0, 1),
+    panel.fun = function(region, value, ...) {
+      circos.genomicRect(region, value, col = nt_annotation_bed_pos$color, border = "red", ...)
+      xlim = CELL_META$xlim
+      circos.text(
+        rep(xlim[1], 9),
+        1:9, 
+        paste("Regions of overlap on heavy strand"), 
+        facing = "downward",
+        adj = c(1.05, 1.5),
+        cex = 0.6
+      )
+    })
+  # Negative strand
+  circos.genomicTrack(
+    mt_genes_bed_neg,
+    stack = TRUE,
+    panel.fun = function(region, value, ...) {
+      circos.genomicRect(region, value, col = mt_genes_bed_neg$color, border = NA, ...)
+      xlim = CELL_META$xlim
+      circos.text(
+        rep(xlim[1], 9),
+        1:9, 
+        paste("ORFs on light strand"), 
+        facing = "downward",
+        adj = c(1.08, 0.6),
+        cex = 0.6
+      )
+    })
+  circos.genomicTrack(
+    nt_annotation_bed_neg,
+    ylim = c(0, 1),
+    panel.fun = function(region, value, ...) {
+      circos.genomicRect(region, value, col = nt_annotation_bed_neg$color, border = "red", ...)
+      xlim = CELL_META$xlim
+      circos.text(
+        rep(xlim[1], 9),
+        1:9, 
+        paste("Regions of overlap on light strand"), 
+        facing = "downward",
+        adj = c(1.05, 1.5),
+        cex = 0.6
+      )
+    })
+  
+  leg_orf = Legend(at = c("Protein coding", "MT-tRNA", "MT-rRNA"), type = "points", 
+  legend_gp = gpar(col = c(jdb_palette("corona")[[1]], jdb_palette("corona")[3:4])), title_position = "topleft", 
+  title = "Types of ORF")
+  
+  leg_overlap = Legend(at = c("Overlap", "No overlap"), type = "points", 
+  legend_gp = gpar(col = c("red", "white")), title_position = "topleft", 
+  title = "ORF overlap")
+  
+  leg <- packLegend(leg_orf, leg_overlap)
+  
+  draw(leg, x = unit(4, "mm"), y = unit(4, "mm"), just = c("left", "bottom"))
+}
+```
+
+
+
+```{r}
+# Plot with lines showing number of concurrent genes
+nt_annotation_bed_pseudo_df_end <- nt_annotation_bed %>% 
+  filter(end - start > 2) %>% 
+  mutate(start = end - 1)
+nt_annotation_bed_pseudo_df_start <- nt_annotation_bed %>% 
+  filter(end - start > 2) %>% 
+  mutate(end = start + 1)
+  
+nt_annotation_bed_fixed <- nt_annotation_bed %>% 
+  mutate(end = case_when(end - start > 2 ~ end - 1, .default = end),
+         start = case_when(end - start > 2 ~ start + 1, .default = start))
+
+nt_annotation_bed_all <- rbind(nt_annotation_bed_fixed, nt_annotation_bed_pseudo_df_end, nt_annotation_bed_pseudo_df_start) %>%
+  data.frame() %>% 
+  mutate(valid_data = end > start) %>% 
+  arrange(strand, start)
+
+{
+  circos.clear()
+  circos.par("start.degree" = 90, "track.height" = 0.1)
+  circos.genomicInitialize(mt_base_genome)
+  circos.genomicTrack(
+    (nt_annotation_bed_all %>% dplyr::filter(strand == 1) %>% dplyr::select(chr, start, end, n_genes)),
+    panel.fun = function(region, value, ...) {
+      circos.genomicLines(region, value, type = "l", numeric.column = "n_genes", ...)
+    })
+  circos.genomicTrack(
+    (nt_annotation_bed_all %>% dplyr::filter(strand == -1) %>% dplyr::select(chr, start, end, n_genes)),
+    panel.fun = function(region, value, ...) {
+      circos.genomicLines(region, value, type = "l", numeric.column = "n_genes", ...)
+    })
+  circos.genomicTrack(
+    mt_genes_bed_pos,
+    stack = TRUE,
+    panel.fun = function(region, value, ...) {
+      circos.genomicRect(region, value, col = mt_genes_bed_pos$color, border = NA, ...)
+    })
+  circos.genomicTrack(
+    mt_genes_bed_neg,
+    stack = TRUE,
+    panel.fun = function(region, value, ...) {
+      circos.genomicRect(region, value, col = mt_genes_bed_neg$color, border = NA, ...)
+    })
+  
+  leg = Legend(at = c("label1", "label2"), type = "points", 
+    legend_gp = gpar(col = 2:3), title_position = "topleft", 
+    title = "Track1")
+}
+```
+
+
+
+
+
+
